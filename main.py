@@ -1,4 +1,6 @@
 
+import random
+
 def calcLiquidity(c, r):
 	n = c/(2*(1-r))
 	y = c/(2*r)
@@ -22,7 +24,8 @@ def calcLiquidity(c, r):
 		r_n = r_c / (1-r)
 	return (y, n, r_y, r_n, ls)
 
-LIQ_FEE = 0.0
+LIQ_FEE = 0.02
+# TODO: build in merge fees, sell orders
 
 # due to the constant product rule, LPs are short convexity somewhat
 class CPMM(object):
@@ -75,6 +78,15 @@ class CPMM(object):
 
 	def getNoPotentialWin(self):
 		return sum([self.trades[x]['no'] for x in self.trades])
+
+	def checkConsOfShares(self):
+		# sum shares in pool + trades
+		yesShares = self.yesShares + sum([self.trades[x]['yes'] for x in self.trades])
+		noShares = self.noShares + sum([self.trades[x]['no'] for x in self.trades])
+		#assert(round(yesShares) == round(noShares) == round(self.stable))
+		print(yesShares)
+		print(noShares)
+		print(self.stable)
 
 	'''def addTrade(self, addr, typ_, dir_, n, px):
 		if addr in self.trades:
@@ -139,51 +151,39 @@ class CPMM(object):
 			del self.lps[addr]
 			del self.liqFees[addr]
 
-	def mergeShares(self, addr, pct):
+	def mergeShares(self, addr, nShares):
 		# pct is amt of mergeable set to merge for stablecoins
 		yesShares = self.trades[addr]['yes']
 		noShares = self.trades[addr]['no']
-		assert((yesShares > 0) and (noShares > 0))
+		assert((yesShares >= nShares) and (noShares >= nShares))
 
-		globalRatio = self.yesShares / self.noShares
-		userRatio = yesShares / noShares
-		rate = self.getRate()
-		if globalRatio > userRatio:
-			# then users' yes shares are limiting factor
-			mergeYesShares = pct * yesShares
-			mergeNoShares = 1./globalRatio * mergeYesShares
-		else:
-			# then users' no shares are limiting factor
-			mergeNoShares = pct * noShares
-			mergeYesShares = globalRatio * mergeNoShares
+		self.trades[addr]['yes'] -= nShares
+		self.trades[addr]['no'] -= nShares
 
-		mktValue = mergeYesShares*rate+mergeNoShares*(1-rate)
-		self.trades[addr]['yes'] -= mergeYesShares
-		self.trades[addr]['no'] -= mergeNoShares
 		if ((self.trades[addr]['yes'] < 0.00000001) and (self.trades[addr]['no'] < 0.00000001)):
 			del self.trades[addr]
-		self.stable -= mktValue
 
-	'''def printTrades(self):
-		for addr in self.trades:
-			for trade in self.trades[addr]:
-				print(trade)'''
+		self.stable -= nShares
 
-	def buyShares(self, addr, typ_, c):
+	def buyShares(self, addr, typ_, c, isForSell=False):
 
-		liqFee = LIQ_FEE * c
-		c -= liqFee
-		self.distLiqFee(liqFee)
+		# for now, don't tax sales
+		if not isForSell:
+			liqFee = LIQ_FEE * c
+			c -= liqFee
+			self.distLiqFee(liqFee)
 
 		noShares = self.noShares
 		yesShares = self.yesShares
 		prod = noShares*yesShares
 		if typ_:
 			d = yesShares+c-prod/(noShares+c)
+			d = round(d) if isForSell else d
 			yesShares += (c-d)
 			noShares += c
 		else:
 			d = noShares+c-prod/(yesShares+c)
+			d = round(d) if isForSell else d
 			yesShares += c
 			noShares += (c-d)
 		self.yesShares = yesShares
@@ -193,39 +193,55 @@ class CPMM(object):
 		self.addTrade(addr, typ_, 1, d)
 		self.stable += c
 
+	# TODO: put an exception so doesnt fail silently
+	def sellShares(self, addr, typ_, nShares):
+		# first you need to buy the other share
+		# then you merge, so the merge cancels the buy and net is the sale of contract
+		# calculate dollar amt needed for purchase of other
+		# check if we have shares to sell
+		if addr in self.trades:
+			if self.trades[addr][('yes' if typ_ else 'no')] > nShares:
+				#import pdb; pdb.set_trace()
+				d = 0
+				yesShares = self.yesShares
+				noShares = self.noShares
+				if typ_:
+					# selling yes, buying no
+					d = ((nShares-yesShares-noShares)+((yesShares+noShares-nShares)**2+4*nShares*yesShares)**(0.5)) / 2
+				else:
+					# selling no, buying yes
+					d = ((nShares-yesShares-noShares)+((yesShares+noShares-nShares)**2+4*nShares*noShares)**(0.5)) / 2
+				# we don't add because we're doing this trade under the hood
+				# user accrues a $d debit that is covered by merge strictly
+				self.buyShares(addr, not typ_, d, isForSell=True)
+				self.mergeShares(addr, nShares)
+
+
 def main():
+
+	#what happens when there is no liquidity?
+	# prices?
+
+	# trading simulation
 	m = CPMM()
-	print("Add $100 liquidity with 50% seed:")
-	m.addLiquidity("a", 100, 0.5)
-	print("LPs:", m.lps)
-	print("No Shares: %f" % (m.noShares))
-	print("Yes Shares: %f" % (m.yesShares))
-	print("Current stablecoin count", m.stable)
-	print("Add $1 liquidity:")
-	m.addLiquidity("b", 1)
-	print("LPs:", m.lps)
-	print("No Shares: %f" % (m.noShares))
-	print("Yes Shares: %f" % (m.yesShares))
-	print("Current stablecoin count", m.stable)
-	print("Current trades", m.trades)
-	print("c buys $150 yes shares: ")
-	m.buyShares("c", True, 150)
-	print("Trades:", m.trades)
-	print("Current stablecoin count", m.stable)
-	print("No Shares: %f" % (m.noShares))
-	print("Yes Shares: %f" % (m.yesShares))
-	print("Redeem $100 liquidity from a")
-	m.removeLiquidity("a",100.)
-	print("LPs:", m.lps)
-	print("No Shares: %f" % (m.noShares))
-	print("Yes Shares: %f" % (m.yesShares))
-	print("Current stablecoin count", m.stable)
-	print("Merge trades from a")
-	m.mergeShares("a",1.)
-	print("Trades:", m.trades)
-	print("Current stablecoin count", m.stable)
-	print("Possible yes winnings,", m.getYesPotentialWin())
-	print("Possible yes winnings,", m.getNoPotentialWin())
+	initLiq = 5000
+	m.addLiquidity("liqBot", initLiq, 0.65)
+
+	addresses = ['a','b','c','d','e','f','g','h','i','j']
+	sizes = [50,100,200,500,1000]
+	pos = [True, False]
+	direction = [1,-1]
+
+	n = 10000
+	for _ in range(n):
+		addr = random.choice(addresses)
+		size = random.choice(sizes)
+		position = random.choice(pos)
+		dir_ = random.choice(direction)
+		if dir_ == 1:
+			m.buyShares(addr, position, size)
+		else:
+			m.sellShares(addr, position, size)
 
 
 if __name__ == '__main__':
